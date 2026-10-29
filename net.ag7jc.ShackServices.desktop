@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Shack Services
+Comment=Red/amber/green status of the shack's key systemd services, and who has the FT-991A
+Exec=@APP_DIR@/service_monitor_launcher.sh
+Icon=@APP_DIR@/assets/icon.png
+Terminal=false
+Categories=Utility;System;HamRadio;
+StartupNotify=true
+# The GTK window's Wayland app id -- also how GNOME ties notifications to this
+# launcher, so the file name must stay net.ag7jc.ShackServices.desktop
+StartupWMClass=net.ag7jc.ShackServices
+X-GNOME-UsesNotifications=true

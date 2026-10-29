@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# shack-mode -- decide which program owns the FT-991A (the data radio).
+#
+#   shack-mode               show who has the radio right now
+#   shack-mode mercury       HF mail gateway: Mercury + connector   (boot default)
+#   shack-mode modem73       Reticulum HF modem
+#   shack-mode apps          free the radio for WSJT-X / JS8Call    (also: wsjt, js8)
+#   add -y to skip the "outbox will transmit" question
+#
+# Only one owner at a time. Before handing the radio over it stops the others,
+# makes sure PTT is off, and (for mercury) lists anything waiting in the
+# outbox, because queued messages transmit as soon as Mercury starts.
+#
+# While Mercury is stopped on purpose, /run/shack-mode tells svc-heartbeat so
+# Kuma stays green -- until it's been PAUSE_MAX_H hours (default 8), then it
+# alerts "forgot to switch back?". /run is wiped at boot: boot = mercury.
+#
+# Run it as yourself, not with sudo; it asks for sudo when it needs it.
+set -euo pipefail
+
+RIG=127.0.0.1:4532
+SPOOL="$HOME/hf_spool/outgoing"
+STATE="${SHACK_MODE_FILE:-/run/shack-mode}"
+CARD_NAME=CODEC                       # the FT-991A's USB sound card
+MODEM73_UNIT=modem73                  # a --user unit
+APP_RE='(wsjtx|jt9|js8call|js8)'      # process names that use the radio
+
+[ "$(id -u)" != 0 ] || { echo "run it as yourself, not with sudo"; exit 1; }
+
+# Shack Services (the GUI) sets SHACK_MODE_ASKPASS=1 + SUDO_ASKPASS, so the
+# password is asked in a window instead of the terminal.
+SUDO=(sudo)
+[ "${SHACK_MODE_ASKPASS:-}" = 1 ] && [ -n "${SUDO_ASKPASS:-}" ] && SUDO=(sudo -A)
+
+red=$'\e[31m'; grn=$'\e[32m'; yel=$'\e[33m'; off=$'\e[0m'
+ok()   { echo "${grn}OK${off} $*"; }
+warn() { echo "${yel}!!${off} $*"; }
+die()  { echo "${red}!!${off} $*"; exit 1; }
+
+sys_active()  { systemctl is-active --quiet "$1"; }
+user_active() { systemctl --user is-active --quiet "$1"; }
+
+apps_running() {
+    pgrep -l -x -i "$APP_RE" 2>/dev/null | awk '{print $2}' | sort -u | tr '\n' ' ' || true
+}
+
+codec_holders() {   # programs with the radio's sound card open
+    local card
+    card=$(readlink "${SHACK_ASOUND:-/proc/asound}/$CARD_NAME" 2>/dev/null) || { echo "(codec not found -- radio off or unplugged?)"; return 0; }
+    { "${SUDO[@]}" fuser -v /dev/snd/pcmC"${card#card}"D0* 2>&1 || true; } \
+        | awk 'NR > 1 && NF >= 4 {print $NF}' | sort -u | tr '\n' ' '
+}
+
+ptt_state() { rigctl -m 2 -r "$RIG" t 2>/dev/null | head -1; }
+
+ptt_off() {
+    local s
+    s=$(ptt_state || true)
+    case "$s" in
+        1) warn "radio is transmitting -- unkeying it"; rigctl -m 2 -r "$RIG" T 0 >/dev/null || true ;;
+        0) ;;
+        *) warn "rigctld isn't answering on $RIG (is rigctld running?)" ;;
+    esac
+}
+
+outbox_list() { find "$SPOOL" -type f ! -name '.*' 2>/dev/null || true; }
+
+set_state() {   # set_state <mode> [paused units...]
+    local mode=$1; shift
+    printf 'MODE=%s\nSINCE=%s\nPAUSED="%s"\n' "$mode" "$(date +%s)" "$*" | "${SUDO[@]}" tee "$STATE" >/dev/null
+}
+
+need_no_apps() {
+    local a; a=$(apps_running)
+    [ -z "$a" ] || die "close ${a}first -- it's using the radio"
+}
+
+stop_mercury() {
+    if sys_active mercury || sys_active mercury-connector; then
+        echo "   stopping Mercury"; "${SUDO[@]}" systemctl stop mercury-connector mercury
+    fi
+}
+
+stop_modem73() {
+    if user_active "$MODEM73_UNIT"; then
+        echo "   stopping modem73"; systemctl --user stop "$MODEM73_UNIT"
+    fi
+}
+
+ensure_hfsync() {   # hf-sync keeps queuing mail in every mode
+    if ! sys_active hf-sync; then
+        warn "hf-sync was not running -- starting it"
+        "${SUDO[@]}" systemctl start hf-sync || warn "hf-sync didn't start -- check: journalctl -u hf-sync -n 20"
+    fi
+}
+
+pw_codec() {   # pw_codec 1|0 -- tell pipewire to let go of (1) / take back (0) the codec
+    local sink src
+    sink=$(pactl list short sinks 2>/dev/null   | awk '/Burr-Brown/ {print $2; exit}')
+    src=$(pactl list short sources 2>/dev/null | awk '/Burr-Brown/ && !/monitor/ {print $2; exit}')
+    [ -n "$sink" ] && pactl suspend-sink   "$sink" "$1" 2>/dev/null || true
+    [ -n "$src" ]  && pactl suspend-source "$src"  "$1" 2>/dev/null || true
+}
+
+free_codec() {   # make sure nothing has the sound card open before Mercury takes it
+    local i h
+    pw_codec 1
+    for i in $(seq 10); do
+        h=$(codec_holders)
+        [ -z "${h// /}" ] && return 0
+        sleep 1
+    done
+    warn "the sound card is still held by: $h"
+    return 1
+}
+
+wait_for_codec() {   # wait_for_codec <program>  -- up to 10 s
+    local i
+    for i in $(seq 10); do codec_holders | grep -qw "$1" && return 0; sleep 1; done
+    return 1
+}
+
+status() {
+    local mode="none (boot default: mercury)" apps owners=0 n
+    if [ -f "$STATE" ]; then
+        local m s
+        m=$(sed -n 's/^MODE=//p' "$STATE"); s=$(sed -n 's/^SINCE=//p' "$STATE")
+        mode="$m (since $(date -d "@$s" '+%a %H:%M'))"
+    fi
+    apps=$(apps_running)
+    echo "shack mode: $mode"
+    printf '   %-17s %s\n' hf-sync           "$(systemctl is-active hf-sync)"
+    printf '   %-17s %s\n' mercury           "$(systemctl is-active mercury)"
+    printf '   %-17s %s\n' mercury-connector "$(systemctl is-active mercury-connector)"
+    printf '   %-17s %s\n' modem73           "$(systemctl --user is-active "$MODEM73_UNIT")"
+    printf '   %-17s %s\n' "WSJT-X/JS8Call"  "${apps:-not running}"
+    printf '   %-17s %s\n' "codec held by"   "$(codec_holders)"
+    printf '   %-17s %s\n' "PTT"             "$(ptt_state || echo '? (rigctld not answering)')"
+    n=$(outbox_list | wc -l)
+    printf '   %-17s %s\n' "outbox"          "$n file(s) waiting"
+    sys_active mercury && owners=$((owners + 1))
+    user_active "$MODEM73_UNIT" && owners=$((owners + 1))
+    [ -n "$apps" ] && owners=$((owners + 1))
+    if [ "$owners" -gt 1 ]; then
+        warn "more than one program can key the radio -- pick one: shack-mode mercury | modem73 | apps"
+    fi
+    return 0
+}
+
+mode_mercury() {
+    need_no_apps
+    ptt_off
+    stop_modem73
+    local q; q=$(outbox_list)
+    if [ -n "$q" ]; then
+        warn "these will TRANSMIT as soon as Mercury starts:"
+        echo "$q" | sed "s|^$SPOOL/|      |"
+        if [ "$YES" != 1 ]; then
+            local a; read -r -p "   start Mercury and send them? [y/N] " a
+            [[ "$a" =~ ^[Yy]$ ]] || die "not started -- move or delete those files first"
+        fi
+    fi
+    free_codec || die "not starting Mercury -- it would run deaf. Close whatever holds the card, then try again"
+    "${SUDO[@]}" systemctl start mercury mercury-connector
+    set_state mercury
+    ensure_hfsync
+    if ! wait_for_codec mercury; then
+        warn "Mercury didn't get the sound card -- restarting it once"
+        free_codec || true
+        "${SUDO[@]}" systemctl restart mercury mercury-connector
+        wait_for_codec mercury || die "Mercury still has no sound card -- check: journalctl -u mercury -n 30 | grep -i audio"
+    fi
+    ok "Mercury has the radio (HF mail gateway is listening)"
+}
+
+mode_modem73() {
+    need_no_apps
+    ptt_off
+    stop_mercury
+    pw_codec 0
+    systemctl --user start "$MODEM73_UNIT"
+    set_state modem73 mercury mercury-connector
+    ensure_hfsync
+    sleep 3
+    if ! user_active "$MODEM73_UNIT"; then
+        die "modem73 didn't stay up -- check: journalctl --user -u $MODEM73_UNIT -n 20"
+    fi
+    if pactl list sink-inputs 2>/dev/null \
+        | awk '/^Sink Input/{s=""} /^[[:space:]]*Sink:/{s=$2} /application.name = "modem73"/{print s}' \
+        | grep -q '^4294967295$'; then
+        warn "modem73 is running but has NO audio device (its -d name doesn't match the codec's name)"
+    else
+        ok "modem73 has the radio (Mercury paused; HF mail queues until you switch back)"
+    fi
+}
+
+mode_apps() {
+    ptt_off
+    stop_mercury
+    stop_modem73
+    pw_codec 0
+    set_state apps mercury mercury-connector
+    ensure_hfsync
+    sleep 1
+    local h; h=$(codec_holders)
+    if echo "$h" | grep -qwE 'mercury|modem73'; then die "still holding the sound card: $h"; fi
+    ok "radio is free for WSJT-X / JS8Call (Mercury paused; HF mail queues meanwhile)"
+    echo "   when you're done: close them, then  shack-mode mercury"
+}
+
+YES=0
+args=()
+for a in "$@"; do case "$a" in -y|--yes) YES=1 ;; *) args+=("$a") ;; esac; done
+
+auth() { "${SUDO[@]}" -v || die "authentication cancelled or wrong password -- nothing was changed"; }
+
+case "${args[0]:-}" in
+    "")                       status ;;
+    mercury|hf|mail)          auth; mode_mercury ;;
+    modem73|reticulum|rns)    auth; mode_modem73 ;;
+    apps|wsjt|wsjtx|js8|js8call|ft8) auth; mode_apps ;;
+    -h|--help|help)           sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown mode '${args[0]}' -- use: mercury | modem73 | apps" ;;
+esac
