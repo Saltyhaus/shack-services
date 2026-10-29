@@ -85,6 +85,69 @@ def amp_summary(path=AMP_STATUS, now=None):
     return "green", "OK  ·  " + "  ·  ".join(parts or ["idle"]) + demo
 
 
+
+# HF Contact guests, from mercury-connector's -e events file
+HF_EVENTS = Path(os.environ.get("HF_EVENTS_FILE", Path.home() / "hf_spool" / "events.jsonl"))
+# what tapping the HF CONTACT row opens: a URL (your HF dashboard) in this
+# file, or else the connector's incoming folder
+HF_INBOX_URL_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "shack-services" / "hf-inbox.url"
+HF_INBOX_DIR = Path.home() / "hf_spool" / "incoming"
+
+
+def _ago(seconds):
+    if seconds < 90:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    return f"{seconds // 3600} h ago"
+
+
+def hf_contact_summary(path=HF_EVENTS, now=None, window=86400, busy_max=1200):
+    """(light colour, one-line text) for the HF CONTACT row: who's called in
+    the last 24 h. Green = a guest is linked right now, amber = messages
+    waiting to be read (any in the window), dim = quiet."""
+    import time as _t
+    now = int(now or _t.time())
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return "dim", "no events file -- is the connector running with -e?"
+    events = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and isinstance(e.get("t"), int):
+            events.append(e)
+    # linked right now?
+    for e in reversed(events):
+        if e.get("event") == "link_down":
+            break
+        if e.get("event") == "link_up":
+            if now - e["t"] < busy_max and e.get("who") == "guest":
+                return "green", f"on the air with {e.get('call', 'a guest')} now"
+            break
+    recent = [e for e in events if e.get("event") in ("echo", "message") and now - e["t"] < window
+              and isinstance(e.get("call"), str)]
+    if not recent:
+        return "dim", "no callers in the last 24 h"
+    msgs = [e for e in recent if e["event"] == "message"]
+    echoes = [e for e in recent if e["event"] == "echo"]
+    parts = []
+    if msgs:
+        parts.append(f"{len(msgs)} message{'s' if len(msgs) > 1 else ''}")
+    if echoes:
+        parts.append(f"{len(echoes)} echo test{'s' if len(echoes) > 1 else ''}")
+    last = recent[-1]
+    what = "message" if last["event"] == "message" else "echo"
+    text = f"{' · '.join(parts)} in 24 h  ·  last {last['call']} ({what}, {_ago(now - last['t'])})"
+    return ("amber" if msgs else "green"), text
+
 # FT-991A data/voice setups, switched by the radio-profile tool
 RADIO_PROFILE = "/usr/local/bin/radio-profile"
 PROFILE_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "radio-profile"
@@ -467,7 +530,15 @@ class ShackWindow:
         self.amp_row.add_prefix(self.amp_light)
         self.amp_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
         amp_list.append(self.amp_row)
-        amp_list.connect("row-activated", lambda *_a: self._open_amp())
+        # HF Contact guests (echo tests and messages)
+        self.hf_row = Adw.ActionRow(title="HF CONTACT", subtitle="checking…", activatable=True)
+        self.hf_row.add_css_class("svc")
+        self.hf_light = Light()
+        self.hf_row.add_prefix(self.hf_light)
+        self.hf_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+        amp_list.append(self.hf_row)
+        amp_list.connect("row-activated", lambda _l, row: self._open_hf_inbox() if row is self.hf_row
+                         else self._open_amp())
         page.append(amp_list)
 
         # banner
@@ -562,6 +633,26 @@ class ShackWindow:
         except GLib.Error as e:
             self.alert("Couldn't start DN-AUTO Monitor", e.message)
 
+    def _open_hf_inbox(self):
+        try:
+            url = HF_INBOX_URL_FILE.read_text().strip()
+        except OSError:
+            url = ""
+        if not url:
+            if not HF_INBOX_DIR.is_dir():
+                self.toast("No inbox to open -- put your HF dashboard's address in " + str(HF_INBOX_URL_FILE))
+                return
+            url = HF_INBOX_DIR.as_uri()
+        try:
+            Gio.AppInfo.launch_default_for_uri(url, None)
+        except GLib.Error as e:
+            self.alert("Couldn't open the HF inbox", e.message)
+
+    def _apply_hf(self):
+        color, text = hf_contact_summary()
+        self.hf_light.set_color(color)
+        self.hf_row.set_subtitle(text)
+
     def _apply_amp(self):
         color, text = amp_summary()
         self.amp_light.set_color(color)
@@ -621,6 +712,7 @@ class ShackWindow:
     def _apply(self, statuses, rs):
         self._polling = False
         self._apply_amp()
+        self._apply_hf()
         self._apply_setup()
         paused = set()
         if rs is not None:

@@ -1,0 +1,16 @@
+# User service: runs in your desktop session, so notifications and sound work.
+#   mkdir -p ~/.config/systemd/user && cp hf-alerts.service ~/.config/systemd/user/
+#   (edit ExecStart if this folder isn't ~/github/shack-services)
+#   systemctl --user daemon-reload && systemctl --user enable --now hf-alerts
+#   journalctl --user -u hf-alerts -f
+[Unit]
+Description=HF Contact alerts (desktop, sound, phone push)
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/github/shack-services/hf_alerts.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

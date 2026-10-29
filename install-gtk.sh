@@ -15,13 +15,14 @@ echo "== 2/4 files -> $DEST"
 mkdir -p "$DEST"
 stamp=$(date +%Y%m%d%H%M%S)
 for f in shack_services.py shack_askpass_client.py shack_askpass.py service_query.py shack_mode.py \
-         service_monitor_gui.py shack-mode \
+         service_monitor_gui.py shack-mode hf_alerts.py hf-alerts.service hf-alerts.env.example \
+         test_hf_alerts.py test_hf_row.py \
          service_monitor_launcher.sh test_notifier.py test_shack_mode.py test_setup_row.py install-gtk.sh \
          net.ag7jc.ShackServices.desktop .gitignore; do
     [ -f "$DEST/$f" ] && ! cmp -s "$SRC/$f" "$DEST/$f" && cp -p "$DEST/$f" "$DEST/$f.bak.$stamp"
     [ "$SRC" = "$DEST" ] || cp -p "$SRC/$f" "$DEST/$f"
 done
-chmod +x "$DEST"/shack_services.py "$DEST"/shack_askpass_client.py "$DEST"/service_monitor_launcher.sh
+chmod +x "$DEST"/hf_alerts.py "$DEST"/shack_services.py "$DEST"/shack_askpass_client.py "$DEST"/service_monitor_launcher.sh
 [ -f "$DEST/shack_askpass.py" ] && chmod +x "$DEST/shack_askpass.py"
 [ -d "$SRC/assets" ] && [ "$SRC" != "$DEST" ] && cp -r "$SRC/assets" "$DEST/"
 rm -rf "$DEST/__pycache__"
