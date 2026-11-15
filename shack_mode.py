@@ -25,16 +25,22 @@ OUTBOX = os.path.expanduser("~/hf_spool/outgoing")
 # when there's no app socket, i.e. the old Tk window).
 ASKPASS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shack_askpass_client.py")
 MODEM73_UNIT = "modem73.service"
+PAT_UNIT = "pat-listen.service"
 APP_NAMES = ("wsjtx", "jt9", "js8call", "js8")   # programs that use the radio
-MODES = ("mercury", "modem73", "apps")
-MODE_LABEL = {"mercury": "MERCURY", "modem73": "MODEM73", "apps": "APPS"}
+MODES = ("mercury", "pat", "modem73", "apps")
+MODE_LABEL = {"mercury": "MERCURY", "pat": "PAT", "modem73": "MODEM73", "apps": "APPS"}
 MODE_TEXT = {
     "mercury": "Mercury -- HF mail gateway",
+    "pat": "Mercury -- Pat listening (Winlink P2P)",
     "modem73": "modem73 -- Reticulum on HF",
     "apps": "free for WSJT-X / JS8Call",
     "none": "nobody -- radio idle",
     "conflict": "MORE THAN ONE program can key it",
 }
+
+# how long pat mode lasts: what the PAT dialog offers, and what shack-mode accepts
+PAT_CHOICES = (("1 hour", "1h"), ("2 hours", "2h"), ("4 hours", "4h"), ("8 hours", "8h"))
+PAT_WHEN_RE = re.compile(r"^(([01]?[0-9]|2[0-3]):[0-5][0-9]|([0-9]+h)?([0-9]+m)?)$")
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -44,6 +50,7 @@ class StateFile:
     mode: Optional[str]
     since: Optional[datetime.datetime]
     paused: List[str]
+    until: Optional[datetime.datetime] = None     # pat mode: when it switches back
 
 
 @dataclasses.dataclass
@@ -55,6 +62,7 @@ class RadioState:
     paused: List[str]             # e.g. ["mercury", "mercury-connector"]
     apps: List[str]               # running WSJT-X / JS8Call process names
     outbox: List[str]             # files waiting to transmit (relative paths)
+    until: Optional[datetime.datetime] = None   # pat mode: back to mercury at
 
 
 def parse_state_file(text: str) -> StateFile:
@@ -66,7 +74,10 @@ def parse_state_file(text: str) -> StateFile:
     since = None
     if values.get("SINCE", "").isdigit():
         since = datetime.datetime.fromtimestamp(int(values["SINCE"]))
-    return StateFile(values.get("MODE") or None, since, values.get("PAUSED", "").split())
+    until = None
+    if values.get("UNTIL", "").isdigit():
+        until = datetime.datetime.fromtimestamp(int(values["UNTIL"]))
+    return StateFile(values.get("MODE") or None, since, values.get("PAUSED", "").split(), until)
 
 
 def read_state_file(path: str = STATE_FILE) -> StateFile:
@@ -102,6 +113,13 @@ def user_unit_active(unit: str = MODEM73_UNIT) -> bool:
         return False
 
 
+def system_unit_active(unit: str) -> bool:
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit], timeout=5).returncode == 0
+    except Exception:
+        return False
+
+
 def outbox_files(root: str = OUTBOX) -> List[str]:
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -133,12 +151,16 @@ def radio_state(mercury_active: bool, state: Optional[StateFile] = None) -> Radi
     # radio is still "apps" -- reserved for WSJT-X / JS8Call.
     if owner == "none" and state.mode == "apps":
         owner = "apps"
-    return RadioState(owner, owners, state.mode, state.since, state.paused, apps, outbox_files())
+    # Mercury with Pat answering instead of the connector
+    if owner == "mercury" and system_unit_active(PAT_UNIT):
+        owner = "pat"
+    until = state.until if state.mode == "pat" else None
+    return RadioState(owner, owners, state.mode, state.since, state.paused, apps, outbox_files(), until)
 
 
 def paused_units(rs: RadioState) -> List[str]:
     """systemd unit names that are stopped on purpose right now."""
-    if rs.mode not in ("apps", "modem73"):
+    if rs.mode not in ("apps", "modem73", "pat"):
         return []
     return [p if p.endswith(".service") else p + ".service" for p in rs.paused]
 
@@ -149,12 +171,15 @@ class SwitchResult:
     message: str
 
 
-def switch(mode: str, timeout: float = 120.0, extra_env: Optional[dict] = None) -> SwitchResult:
+def switch(mode: str, timeout: float = 120.0, extra_env: Optional[dict] = None,
+           when: Optional[str] = None) -> SwitchResult:
     """Run `shack-mode -y <mode>` under a pseudo-terminal (`script`), so sudo
     asks for the password once per switch, through the GUI askpass window.
     The GUI does the outbox / open-apps questions itself before calling."""
     if mode not in MODES:
         return SwitchResult(False, f"unknown mode {mode!r}")
+    if when is not None and (mode != "pat" or not when or not PAT_WHEN_RE.fullmatch(when)):
+        return SwitchResult(False, f"can't read {when!r} -- use 2h, 90m or a time like 21:00")
     if not os.access(SHACK_MODE, os.X_OK):
         return SwitchResult(False, f"{SHACK_MODE} isn't installed")
     if not os.access(ASKPASS, os.X_OK):
@@ -162,7 +187,7 @@ def switch(mode: str, timeout: float = 120.0, extra_env: Optional[dict] = None) 
     env = dict(os.environ, SUDO_ASKPASS=ASKPASS, SHACK_MODE_ASKPASS="1", **(extra_env or {}))
     try:
         r = subprocess.run(
-            ["script", "-qec", f"{SHACK_MODE} -y {mode}", "/dev/null"],
+            ["script", "-qec", f"{SHACK_MODE} -y {mode}" + (f" {when}" if when else ""), "/dev/null"],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, env=env,
         )
     except subprocess.TimeoutExpired:

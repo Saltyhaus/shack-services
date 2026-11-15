@@ -1,0 +1,18 @@
+#!/bin/sh
+# shack-pat-revert -- Pat mode's time is up: hand Mercury back to
+# mercury-connector (HF Contact echo tests, guests, HF mail).
+#
+# `shack-mode pat` schedules this with a one-off systemd timer
+# (shack-pat-revert.timer). It runs as root, so it needs no password, and
+# does nothing if the radio was switched to another mode in the meantime.
+#
+# Install:  sudo install -m 755 systemd/shack-pat-revert /usr/local/sbin/
+STATE=${SHACK_MODE_FILE:-/run/shack-mode}
+
+grep -qx 'MODE=pat' "$STATE" 2>/dev/null || exit 0
+if systemctl is-active --quiet mercury; then
+    systemctl start mercury-connector      # Conflicts= in pat-listen.service stops Pat
+fi
+systemctl stop pat-listen 2>/dev/null || true
+printf 'MODE=mercury\nSINCE=%s\nPAUSED=""\n' "$(date +%s)" > "$STATE"
+logger -t shack-mode "Pat mode time is up: mercury-connector has Mercury again" 2>/dev/null || true

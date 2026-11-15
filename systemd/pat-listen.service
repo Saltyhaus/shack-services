@@ -1,0 +1,31 @@
+# Pat listening on Mercury for Winlink peer-to-peer connections to this
+# station. `shack-mode pat` starts it; don't enable it at boot (boot is
+# mercury-connector, the HF Contact / HF mail mode).
+#
+# Mercury serves one program at a time, so this and mercury-connector
+# can't both have it: Conflicts= makes starting one stop the other.
+#
+# Pat's own web page (read and write mail) is on this computer only:
+# http://127.0.0.1:8080 -- it has no password, so it isn't put on the LAN.
+#
+# Install:  sudo install -m 644 systemd/pat-listen.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+# Change User= and the paths if you're not ag7jc.
+
+[Unit]
+Description=Pat listening for Winlink P2P on Mercury
+Requires=mercury.service
+After=mercury.service rigctld.service
+Conflicts=mercury-connector.service
+
+[Service]
+Type=simple
+User=ag7jc
+# wait for Mercury's TNC port, the same way mercury-connector does
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 40); do ss -Hltn "sport = :8300" | grep -q . && exit 0; sleep 0.5; done; echo "Mercury not listening on 8300 after 20 s"; exit 1'
+ExecStart=/usr/bin/pat --listen varahf http --addr 127.0.0.1:8080
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

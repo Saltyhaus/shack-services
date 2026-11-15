@@ -3,9 +3,18 @@
 #
 #   shack-mode               show who has the radio right now
 #   shack-mode mercury       HF mail gateway: Mercury + connector   (boot default)
+#   shack-mode pat [WHEN]    Mercury + Pat listening for Winlink peer-to-peer;
+#                            back to mercury on its own after WHEN: 2h, 90m,
+#                            1h30m, or a time like 21:00 (default 4h, max 24h).
+#                            Run it again while in pat mode to change the end.
 #   shack-mode modem73       Reticulum HF modem
 #   shack-mode apps          free the radio for WSJT-X / JS8Call    (also: wsjt, js8)
 #   add -y to skip the "outbox will transmit" question
+#
+# Mercury itself serves one program at a time (1.9.24+), so mercury and pat
+# modes are the same radio owner with a different program answering: the
+# connector (HF Contact, HF mail) or Pat. While Pat answers, HF mail and
+# HF Contact guests wait.
 #
 # Only one owner at a time. Before handing the radio over it stops the others,
 # makes sure PTT is off, and (for mercury) lists anything waiting in the
@@ -24,6 +33,11 @@ STATE="${SHACK_MODE_FILE:-/run/shack-mode}"
 CARD_NAME=CODEC                       # the FT-991A's USB sound card
 MODEM73_UNIT=modem73                  # a --user unit
 APP_RE='(wsjtx|jt9|js8call|js8)'      # process names that use the radio
+PAT_UNIT=pat-listen                   # systemd/pat-listen.service
+REVERT_UNIT=shack-pat-revert          # one-off timer that ends pat mode
+REVERT_BIN=${SHACK_PAT_REVERT:-/usr/local/sbin/shack-pat-revert}
+PAT_DEFAULT=4h
+PAT_MAX_S=86400
 
 [ "$(id -u)" != 0 ] || { echo "run it as yourself, not with sudo"; exit 1; }
 
@@ -65,9 +79,31 @@ ptt_off() {
 
 outbox_list() { find "$SPOOL" -type f ! -name '.*' 2>/dev/null || true; }
 
+STATE_UNTIL=""   # set before set_state for pat mode: when it switches back (epoch)
 set_state() {   # set_state <mode> [paused units...]
     local mode=$1; shift
-    printf 'MODE=%s\nSINCE=%s\nPAUSED="%s"\n' "$mode" "$(date +%s)" "$*" | "${SUDO[@]}" tee "$STATE" >/dev/null
+    { printf 'MODE=%s\nSINCE=%s\nPAUSED="%s"\n' "$mode" "$(date +%s)" "$*"
+      [ -z "$STATE_UNTIL" ] || printf 'UNTIL=%s\n' "$STATE_UNTIL"; } | "${SUDO[@]}" tee "$STATE" >/dev/null
+}
+
+pat_seconds() {   # pat_seconds <2h|90m|1h30m|21:00> -> seconds from now
+    local d=$1 now t
+    if [[ $d =~ ^([0-9]{1,2}):([0-9]{2})$ ]]; then
+        [ "${BASH_REMATCH[1]#0}" -le 23 ] 2>/dev/null && [ "${BASH_REMATCH[2]#0}" -le 59 ] 2>/dev/null || return 1
+        now=$(date +%s)
+        t=$(date -d "$d" +%s 2>/dev/null) || return 1
+        [ "$t" -gt "$now" ] || t=$((t + 86400))      # already past today: tomorrow
+        echo $((t - now)); return 0
+    fi
+    [[ -n $d && $d =~ ^(([0-9]+)h)?(([0-9]+)m)?$ ]] || return 1
+    t=$(( 10#${BASH_REMATCH[2]:-0} * 3600 + 10#${BASH_REMATCH[4]:-0} * 60 ))
+    [ "$t" -gt 0 ] || return 1
+    echo "$t"
+}
+
+cancel_revert() {   # forget a scheduled end of pat mode
+    "${SUDO[@]}" systemctl stop "$REVERT_UNIT.timer" >/dev/null 2>&1 || true
+    "${SUDO[@]}" systemctl reset-failed "$REVERT_UNIT.timer" "$REVERT_UNIT.service" >/dev/null 2>&1 || true
 }
 
 need_no_apps() {
@@ -76,8 +112,9 @@ need_no_apps() {
 }
 
 stop_mercury() {
-    if sys_active mercury || sys_active mercury-connector; then
-        echo "   stopping Mercury"; "${SUDO[@]}" systemctl stop mercury-connector mercury
+    cancel_revert
+    if sys_active mercury || sys_active mercury-connector || sys_active "$PAT_UNIT"; then
+        echo "   stopping Mercury"; "${SUDO[@]}" systemctl stop "$PAT_UNIT" mercury-connector mercury
     fi
 }
 
@@ -123,15 +160,18 @@ wait_for_codec() {   # wait_for_codec <program>  -- up to 10 s
 status() {
     local mode="none (boot default: mercury)" apps owners=0 n
     if [ -f "$STATE" ]; then
-        local m s
+        local m s u
         m=$(sed -n 's/^MODE=//p' "$STATE"); s=$(sed -n 's/^SINCE=//p' "$STATE")
         mode="$m (since $(date -d "@$s" '+%a %H:%M'))"
+        u=$(sed -n 's/^UNTIL=//p' "$STATE")
+        [ -z "$u" ] || mode="$mode, back to mercury at $(date -d "@$u" '+%a %H:%M')"
     fi
     apps=$(apps_running)
     echo "shack mode: $mode"
     printf '   %-17s %s\n' hf-sync           "$(systemctl is-active hf-sync)"
     printf '   %-17s %s\n' mercury           "$(systemctl is-active mercury)"
     printf '   %-17s %s\n' mercury-connector "$(systemctl is-active mercury-connector)"
+    printf '   %-17s %s\n' "pat (listening)" "$(systemctl is-active "$PAT_UNIT" 2>/dev/null || true)"
     printf '   %-17s %s\n' modem73           "$(systemctl --user is-active "$MODEM73_UNIT")"
     printf '   %-17s %s\n' "WSJT-X/JS8Call"  "${apps:-not running}"
     printf '   %-17s %s\n' "codec held by"   "$(codec_holders)"
@@ -142,7 +182,7 @@ status() {
     user_active "$MODEM73_UNIT" && owners=$((owners + 1))
     [ -n "$apps" ] && owners=$((owners + 1))
     if [ "$owners" -gt 1 ]; then
-        warn "more than one program can key the radio -- pick one: shack-mode mercury | modem73 | apps"
+        warn "more than one program can key the radio -- pick one: shack-mode mercury | pat | modem73 | apps"
     fi
     return 0
 }
@@ -160,6 +200,15 @@ mode_mercury() {
             [[ "$a" =~ ^[Yy]$ ]] || die "not started -- move or delete those files first"
         fi
     fi
+    cancel_revert
+    if sys_active mercury && sys_active "$PAT_UNIT"; then
+        # Pat had Mercury: just hand it back to the connector (Conflicts= stops Pat)
+        "${SUDO[@]}" systemctl start mercury-connector
+        set_state mercury
+        ensure_hfsync
+        ok "mercury-connector has Mercury again (HF Contact and HF mail are listening; Pat stopped)"
+        return 0
+    fi
     free_codec || die "not starting Mercury -- it would run deaf. Close whatever holds the card, then try again"
     "${SUDO[@]}" systemctl start mercury mercury-connector
     set_state mercury
@@ -171,6 +220,42 @@ mode_mercury() {
         wait_for_codec mercury || die "Mercury still has no sound card -- check: journalctl -u mercury -n 30 | grep -i audio"
     fi
     ok "Mercury has the radio (HF mail gateway is listening)"
+}
+
+mode_pat() {
+    local when=${args[1]:-$PAT_DEFAULT} secs until
+    secs=$(pat_seconds "$when") || die "can't read '$when' -- use 2h, 90m, 1h30m or a time like 21:00"
+    [ "$secs" -le "$PAT_MAX_S" ] || die "pat mode lasts 24 hours at most"
+    until=$(( $(date +%s) + secs ))
+    systemctl cat "$PAT_UNIT" >/dev/null 2>&1 || die "$PAT_UNIT.service isn't installed -- see the README (Pat mode)"
+    [ -x "$REVERT_BIN" ] || die "$REVERT_BIN isn't installed -- see the README (Pat mode)"
+    need_no_apps
+    if ! sys_active mercury; then
+        ptt_off
+        stop_modem73
+        free_codec || die "not starting Mercury -- it would run deaf. Close whatever holds the card, then try again"
+        "${SUDO[@]}" systemctl start mercury
+        wait_for_codec mercury || die "Mercury has no sound card -- check: journalctl -u mercury -n 30 | grep -i audio"
+    fi
+    if ! sys_active "$PAT_UNIT"; then
+        "${SUDO[@]}" systemctl start "$PAT_UNIT"      # Conflicts= stops mercury-connector
+        sleep 2
+        sys_active "$PAT_UNIT" || die "Pat didn't stay up -- check: journalctl -u $PAT_UNIT -n 20"
+    fi
+    if sys_active mercury-connector; then
+        die "mercury-connector is still running -- does $PAT_UNIT.service have Conflicts=mercury-connector.service?"
+    fi
+    cancel_revert
+    "${SUDO[@]}" systemd-run --quiet --unit="$REVERT_UNIT" --on-active="${secs}s" \
+        --timer-property=AccuracySec=5s "$REVERT_BIN" \
+        || die "Pat is listening, but the switch back couldn't be scheduled -- run: shack-mode mercury when done"
+    STATE_UNTIL=$until
+    set_state pat mercury-connector
+    ensure_hfsync
+    ok "Pat is listening for Winlink P2P until $(date -d "@$until" '+%a %H:%M'), then back to mercury"
+    echo "   HF Contact guests and HF mail wait until then. Pat's page: http://127.0.0.1:8080"
+    local n; n=$(outbox_list | wc -l)
+    [ "$n" -eq 0 ] || warn "$n HF mail file(s) waiting in the outbox -- they go out after the switch back"
 }
 
 mode_modem73() {
@@ -217,8 +302,9 @@ auth() { "${SUDO[@]}" -v || die "authentication cancelled or wrong password -- n
 case "${args[0]:-}" in
     "")                       status ;;
     mercury|hf|mail)          auth; mode_mercury ;;
+    pat|winlink)              auth; mode_pat ;;
     modem73|reticulum|rns)    auth; mode_modem73 ;;
     apps|wsjt|wsjtx|js8|js8call|ft8) auth; mode_apps ;;
-    -h|--help|help)           sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) die "unknown mode '${args[0]}' -- use: mercury | modem73 | apps" ;;
+    -h|--help|help)           sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) die "unknown mode '${args[0]}' -- use: mercury | pat [2h|21:00] | modem73 | apps" ;;
 esac

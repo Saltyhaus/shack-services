@@ -9,7 +9,7 @@ Built for a station where one radio (here an FT-991A) is shared by Mercury, a Re
 ## What it does
 
 - **Services**: a light for each unit (running, starting, failed, stopped), how long it's been up, one-tap **restart**, and a **live log** that follows the journal. You get a desktop notification when one fails or stops, and again when it's back. The list is yours to edit.
-- **Who has the radio**: MERCURY | MODEM73 | APPS. Switching stops the others, makes sure the radio isn't transmitting, and warns you if HF mail is waiting in the outbox, since it goes out as soon as Mercury starts. This is the `shack-mode` script, which works on its own in a terminal too.
+- **Who has the radio**: MERCURY | PAT | MODEM73 | APPS. PAT lets Pat answer on Mercury for Winlink peer-to-peer, for a length of time you pick or until a time of day, then hands Mercury back by itself. Switching stops the others, makes sure the radio isn't transmitting, and warns you if HF mail is waiting in the outbox, since it goes out as soon as Mercury starts. This is the `shack-mode` script, which works on its own in a terminal too.
 - **DATA / VOICE setups** for the FT-991A and KX3, through [radio-profile](https://github.com/Saltyhaus/radio-profile). It shows what will change before writing anything.
 - **AMP row**: band, temperature, power and SWR from [DN-AUTO Monitor](https://github.com/Saltyhaus/dnauto-linux-monitor), when it's running.
 - **HF CONTACT row**: who's called your [HF Contact](https://github.com/Saltyhaus/hf-contact) station in the last 24 hours. Amber means a message came in; green with "on the air with…" means someone's linked right now. Tap it to open your inbox.
@@ -50,7 +50,26 @@ Open `shack-mode` and check the settings at the top before you use it. They're f
 | `RIG` | rigctld at `127.0.0.1:4532` |
 | `CARD_NAME` | the radio's sound card, `CODEC` (the FT-991A's) |
 | `SPOOL` | the outbox, `~/hf_spool/outgoing` |
-| unit names | `mercury`, `mercury-connector` (system units), `modem73` (a user unit) |
+| unit names | `mercury`, `mercury-connector`, `pat-listen` (system units), `modem73` (a user unit) |
+
+### Pat mode (optional)
+
+Mercury 1.9.24 and newer serve one program at a time. In MERCURY mode that's mercury-connector (HF mail, HF Contact echo tests and messages); PAT hands Mercury to [Pat](https://getpat.io) instead, listening for Winlink peer-to-peer connections, so another station can run `pat connect varahf:///YOURCALL`. While Pat answers, HF Contact guests and HF mail wait.
+
+Pat needs to be set up for Mercury first: `varahf` pointing at Mercury's TNC (`127.0.0.1:8300`), with PTT left to Mercury. Then:
+
+```
+sudo install -m 644 systemd/pat-listen.service /etc/systemd/system/
+sudo install -m 755 systemd/shack-pat-revert /usr/local/sbin/
+sudo systemctl daemon-reload
+shack-mode pat 2h        # or 90m, 1h30m, or a time like 21:00 (default 4h, at most 24h)
+shack-mode mercury       # back early
+```
+
+- Check `User=` in `pat-listen.service`. Don't enable it: starting it is shack-mode's job, and boot means MERCURY.
+- `pat-listen.service` has `Conflicts=mercury-connector.service`, so starting one stops the other. Nothing can leave both trying to use Mercury.
+- The switch back is a one-off systemd timer (`shack-pat-revert.timer`) that runs `shack-pat-revert` as root, so no password is needed when it fires. Switching to any mode by hand cancels it, and pressing PAT again while Pat is on just moves the end time.
+- Pat's own web page, for reading what arrived, is at `http://127.0.0.1:8080` on the shack computer only. It has no password, so it isn't put on the network.
 
 ## Your services
 
@@ -95,7 +114,7 @@ systemctl --user daemon-reload && systemctl --user enable --now hf-alerts
 - `shack-mode` runs as you and asks for sudo itself. Run it without `sudo`.
 - While Mercury is stopped on purpose, `/run/shack-mode` says so (mode, since when, which units), and Shack Services shows those units as PAUSED instead of red. An outside monitor can read the same file to tell "paused" from "down". `/run` is cleared at boot, so a reboot means Mercury again.
 - Old window: `SSM_UI=tk ./service_monitor_launcher.sh`
-- Tests: `python3 -m unittest test_notifier test_shack_mode test_setup_row test_hf_row test_hf_alerts`
+- Tests: `python3 -m unittest test_notifier test_shack_mode test_shack_mode_pat test_setup_row test_hf_row test_hf_alerts`
 
 ## License
 

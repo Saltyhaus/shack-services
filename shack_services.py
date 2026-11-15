@@ -211,7 +211,7 @@ BORDER = "#1c2740"
 COLORS = ("dim", "green", "red", "amber", "teal")
 CATEGORY_COLOR = {sq.GOOD: "green", sq.BAD: "red", sq.TRANSITIONING: "amber", sq.STOPPED: "dim"}
 CATEGORY_LABEL = {sq.GOOD: "RUNNING", sq.BAD: "FAILED", sq.TRANSITIONING: "CHANGING", sq.STOPPED: "STOPPED"}
-OWNER_COLOR = {"mercury": "green", "modem73": "teal", "apps": "amber", "none": "dim", "conflict": "red"}
+OWNER_COLOR = {"mercury": "green", "pat": "green", "modem73": "teal", "apps": "amber", "none": "dim", "conflict": "red"}
 
 CSS = f"""
 @define-color accent_color {TEAL};
@@ -554,8 +554,8 @@ class ShackWindow:
         self._build_rows()
 
         hint = Gtk.Label(wrap=True, xalign=0.5,
-                         label="Tap a service for its live log, ⟳ to restart it. MERCURY / MODEM73 / APPS "
-                               "hand the FT-991A to one program. Both ask for your password, every time. "
+                         label="Tap a service for its live log, ⟳ to restart it. MERCURY / PAT / MODEM73 / APPS "
+                               "hand the FT-991A to one program; PAT switches back on its own. Both ask for your password, every time. "
                                "Closing the window keeps watching in the background.")
         hint.add_css_class("dim")
         hint.add_css_class("caption")
@@ -791,6 +791,9 @@ class ShackWindow:
         info = []
         if rs.mode and rs.since:
             info.append(f"since {rs.since:%a %H:%M}")
+        if rs.owner == "pat":
+            info.append(f"back to MERCURY at {rs.until:%a %H:%M}" if rs.until else "no switch-back set")
+            info.append("HF Contact & mail wait")
         if rs.apps:
             info.append("open: " + ", ".join(rs.apps))
         if rs.outbox:
@@ -911,6 +914,14 @@ class ShackWindow:
             return
         rs = self.radio
         label = shack_mode.MODE_LABEL[mode]
+        if mode == "pat":
+            if rs and rs.apps:
+                self.alert("Close the apps first",
+                           f"{', '.join(rs.apps)} is still open and using the radio.\n\n"
+                           f"Close it, then press {label} again.")
+                return
+            self._ask_pat(rs)
+            return
         if rs and rs.owner == mode:
             return
         if rs and mode != "apps" and rs.apps:
@@ -930,6 +941,47 @@ class ShackWindow:
         self.ask(f"Switch radio to {label}?", body,
                  [("no", "Cancel", None), ("yes", yes, "suggested")],
                  lambda rid: rid == "yes" and self._do_switch(mode), default="yes")
+
+    def _ask_pat(self, rs):
+        """PAT: how long Pat answers before Mercury goes back to the
+        connector -- a length, or until a time. Pressed again while Pat is
+        on, it just changes the end."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        names = [n for n, _ in shack_mode.PAT_CHOICES] + ["Until a time…"]
+        pick = Gtk.DropDown.new_from_strings(names)
+        pick.set_selected(2)                                   # 4 hours
+        box.append(pick)
+        at = Gtk.Entry(placeholder_text="21:00  (24-hour, this computer's time)", visible=False)
+        box.append(at)
+        pick.connect("notify::selected", lambda d, _p: at.set_visible(d.get_selected() == len(names) - 1))
+        self._pat_widgets = (pick, at)                         # for the test harness
+        again = rs is not None and rs.owner == "pat"
+        if again:
+            heading = "Change when Pat mode ends?"
+            body = ("Pat keeps listening; this only moves the switch back to MERCURY.\n\n"
+                    "You'll be asked for your password.")
+            yes = "Set"
+        else:
+            heading = "Let Pat answer on Mercury?"
+            body = ("Pat listens for Winlink peer-to-peer connections to this station. "
+                    "HF Contact echo tests, guest messages and field-station mail wait until it "
+                    "switches back to MERCURY on its own.\n\nYou'll be asked for your password.")
+            yes = "Switch to PAT"
+
+        def done(rid):
+            if rid != "yes":
+                return
+            i = pick.get_selected()
+            if i < len(shack_mode.PAT_CHOICES):
+                when = shack_mode.PAT_CHOICES[i][1]
+            else:
+                when = at.get_text().strip()
+                if not re.fullmatch(r"([01]?[0-9]|2[0-3]):[0-5][0-9]", when):
+                    self.alert("Pick a time like 21:00", f"Couldn't read {when!r} as a time of day.")
+                    return
+            self._do_switch("pat", when)
+        self.ask(heading, body, [("no", "Cancel", None), ("yes", yes, "suggested")], done,
+                 default="yes", extra=box)
 
     # ------------------------------------------------------- data/voice setup
 
@@ -1053,7 +1105,7 @@ class ShackWindow:
                                    else self.alert("Not saved", out.strip()[-800:]), False)[-1])
         threading.Thread(target=work, daemon=True).start()
 
-    def _do_switch(self, mode):
+    def _do_switch(self, mode, when=None):
         label = shack_mode.MODE_LABEL[mode]
         self.switching = True
         self.radio_lbl.set_label(f"switching to {label}…")
@@ -1065,7 +1117,7 @@ class ShackWindow:
         self._auth_tries = 0
 
         def work():
-            r = shack_mode.switch(mode, extra_env={"SHACK_ASKPASS_SOCK": self.askpass.path})
+            r = shack_mode.switch(mode, extra_env={"SHACK_ASKPASS_SOCK": self.askpass.path}, when=when)
             GLib.idle_add(self._switch_done, mode, r)
         threading.Thread(target=work, daemon=True).start()
 
