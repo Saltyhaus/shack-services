@@ -69,7 +69,7 @@ shack-mode mercury       # back early
 - Check `User=` in `pat-listen.service`. Don't enable it: starting it is shack-mode's job, and boot means MERCURY.
 - `pat-listen.service` has `Conflicts=mercury-connector.service`, so starting one stops the other. Nothing can leave both trying to use Mercury.
 - The switch back is a one-off systemd timer (`shack-pat-revert.timer`) that runs `shack-pat-revert` as root, so no password is needed when it fires. Switching to any mode by hand cancels it, and pressing PAT again while Pat is on just moves the end time.
-- Pat's own web page, for reading what arrived, is at `http://127.0.0.1:8080` on the shack computer only. It has no password, so it isn't put on the network.
+- Pat's own web page, for reading what arrived, is at `http://127.0.0.1:8081` on the shack computer only. It has no password, so it isn't put on the network.
 
 ## Your services
 

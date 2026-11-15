@@ -253,7 +253,7 @@ mode_pat() {
     set_state pat mercury-connector
     ensure_hfsync
     ok "Pat is listening for Winlink P2P until $(date -d "@$until" '+%a %H:%M'), then back to mercury"
-    echo "   HF Contact guests and HF mail wait until then. Pat's page: http://127.0.0.1:8080"
+    echo "   HF Contact guests and HF mail wait until then. Pat's page: http://127.0.0.1:8081"
     local n; n=$(outbox_list | wc -l)
     [ "$n" -eq 0 ] || warn "$n HF mail file(s) waiting in the outbox -- they go out after the switch back"
 }
