@@ -11,6 +11,7 @@ Built for a station where one radio (here an FT-991A) is shared by Mercury, a Re
 - **Services**: a light for each unit (running, starting, failed, stopped), how long it's been up, one-tap **restart**, and a **live log** that follows the journal. You get a desktop notification when one fails or stops, and again when it's back. The list is yours to edit.
 - **Who has the radio**: MERCURY | PAT | MODEM73 | APPS. PAT lets Pat answer on Mercury for Winlink peer-to-peer, for a length of time you pick or until a time of day, then hands Mercury back by itself. Switching stops the others, makes sure the radio isn't transmitting, and warns you if HF mail is waiting in the outbox, since it goes out as soon as Mercury starts. This is the `shack-mode` script, which works on its own in a terminal too.
 - **DATA / VOICE setups** for the FT-991A and KX3, through [radio-profile](https://github.com/Saltyhaus/radio-profile). It shows what will change before writing anything.
+- **QSY + TUNE** for each radio: type a frequency, and it sends a 10 W tone for 5-20 s so the antenna tuner can match, showing PTT, ALC, power and SWR as it goes. Power goes back to what it was afterwards. See [Tune](#tune).
 - **AMP row**: band, temperature, power and SWR from [DN-AUTO Monitor](https://github.com/Saltyhaus/dnauto-linux-monitor), when it's running.
 - **HF CONTACT row**: who's called your [HF Contact](https://github.com/Saltyhaus/hf-contact) station in the last 24 hours. Amber means a message came in; green with "on the air with…" means someone's linked right now. Tap it to open your inbox.
 - **One password dialog** for everything that needs sudo, asked every time and never stored.
@@ -71,6 +72,28 @@ shack-mode mercury       # back early
 - The switch back is a one-off systemd timer (`shack-pat-revert.timer`) that runs `shack-pat-revert` as root, so no password is needed when it fires. Switching to any mode by hand cancels it, and pressing PAT again while Pat is on just moves the end time.
 - Pat's own web page, for reading what arrived, is at `http://127.0.0.1:8081` on the shack computer only. It has no password, so it isn't put on the network.
 
+## Tune
+
+**QSY + TUNE…** on a radio's card asks for a frequency (MHz) and how long, then:
+
+1. refuses anything outside a US amateur band, or a radio that's already transmitting
+2. **FT-991A**: stops Mercury (and the connector or Pat mode on it), since Mercury holds the radio's sound card, and starts the same units again after, waiting for Mercury to listen before starting what uses it
+3. sets the frequency, DATA mode and 10 W, reads the power back, and won't key if the radio reports more than 15 W
+4. starts the tone first and keys only once it's actually playing, so a busy sound card never leaves the radio keyed with nothing going out
+5. puts the power back as it was, always, even after Ctrl-C, an error or a dropped SSH session. The FT-991A stays in DATA-USB on the new frequency; the KX3 goes back to its old mode
+
+**KX3 and the amp:** the KX3 drives the amp, and 10 W in is close to a kilowatt out. The Tune button stays off until you tick "The amp is in STANDBY". If DN-AUTO Monitor is running, the tune also watches the amp's forward power and unkeys at once if it goes over 50 W. Its status updates every couple of seconds, so it's a backstop, not a replacement for STANDBY. If DN-AUTO Monitor isn't running, the dialog says there's no watchdog.
+
+From a terminal, over SSH too:
+
+```
+python3 radio_tune.py ft991a 7.1065 --dry-run     # what it would do, keys nothing
+python3 radio_tune.py ft991a 7.1065               # 10 s at 10 W
+python3 radio_tune.py kx3 14.105 --secs 5
+```
+
+Sound devices, rigctld ports and tone level live at the top of `radio_tune.py`. To change them, use `~/.config/shack-services/tune.json` rather than editing the file, for example `{"kx3": {"device": "plughw:CARD=Device_1,DEV=0", "level": 0.2}}`. If ALC sits at full, lower `level`. If there's no power out, raise it, or check that the radio's DATA input is the USB/rear one.
+
 ## Your services
 
 The first start writes `~/.config/shack-services/services.txt`, one unit per line, `#` for comments. Change it from menu › **Edit service list…**, for example:
@@ -114,7 +137,7 @@ systemctl --user daemon-reload && systemctl --user enable --now hf-alerts
 - `shack-mode` runs as you and asks for sudo itself. Run it without `sudo`.
 - While Mercury is stopped on purpose, `/run/shack-mode` says so (mode, since when, which units), and Shack Services shows those units as PAUSED instead of red. An outside monitor can read the same file to tell "paused" from "down". `/run` is cleared at boot, so a reboot means Mercury again.
 - Old window: `SSM_UI=tk ./service_monitor_launcher.sh`
-- Tests: `python3 -m unittest test_notifier test_shack_mode test_shack_mode_pat test_setup_row test_hf_row test_hf_alerts`
+- Tests: `python3 -m unittest test_notifier test_shack_mode test_shack_mode_pat test_setup_row test_hf_row test_hf_alerts test_radio_tune`
 
 ## License
 

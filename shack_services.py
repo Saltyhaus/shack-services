@@ -40,6 +40,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+import radio_tune  # noqa: E402
 import shack_mode  # noqa: E402
 import service_query as sq  # noqa: E402
 
@@ -508,7 +509,9 @@ class ShackWindow:
         card.append(btns)
 
         self.setup_btns, self.setup_info, self.setup_busy = {}, {}, set()
+        self.tune_btns = {}
         self._setup_row(card, "ft991a")
+        self._tune_row(card, "ft991a")
         page.append(card)
 
         # KX3: just its data/voice setup
@@ -519,6 +522,7 @@ class ShackWindow:
         klab.add_css_class("heading")
         kcard.append(klab)
         self._setup_row(kcard, "kx3")
+        self._tune_row(kcard, "kx3")
         page.append(kcard)
 
         # amplifier, from DN-AUTO Monitor's status file
@@ -555,7 +559,8 @@ class ShackWindow:
 
         hint = Gtk.Label(wrap=True, xalign=0.5,
                          label="Tap a service for its live log, ⟳ to restart it. MERCURY / PAT / MODEM73 / APPS "
-                               "hand the FT-991A to one program; PAT switches back on its own. Both ask for your password, every time. "
+                               "hand the FT-991A to one program; PAT switches back on its own. QSY + TUNE sets a "
+                               "frequency and gives the tuner a 10 W tone. All ask for your password, every time. "
                                "Closing the window keeps watching in the background.")
         hint.add_css_class("dim")
         hint.add_css_class("caption")
@@ -684,6 +689,21 @@ class ShackWindow:
         info.add_css_class("caption")
         card.append(info)
         self.setup_info[radio] = info
+
+    def _tune_row(self, card, radio):
+        row = Gtk.Box(spacing=8)
+        tl = Gtk.Label(label="TUNE")
+        tl.add_css_class("dim")
+        tl.add_css_class("heading")
+        row.append(tl)
+        b = Gtk.Button(label="QSY + TUNE…", hexpand=True)
+        b.add_css_class("mode-btn")
+        b.set_tooltip_text("Set a frequency and send a 10 W tone so the tuner can match")
+        b.connect("clicked", lambda _b, r=radio: self._tune_clicked(r))
+        row.append(b)
+        self.tune_btns[radio] = b
+        # SETUP's info line sits under SETUP; TUNE goes below it
+        card.append(row)
 
     def _apply_setup(self):
         for radio in SETUP_RADIOS:
@@ -982,6 +1002,133 @@ class ShackWindow:
             self._do_switch("pat", when)
         self.ask(heading, body, [("no", "Cancel", None), ("yes", yes, "suggested")], done,
                  default="yes", extra=box)
+
+    # ------------------------------------------------------------------ tune
+
+    def _tune_clicked(self, radio):
+        if radio in self.setup_busy or (radio == "ft991a" and self.switching):
+            return
+        s = radio_tune.radio_settings(radio)
+
+        def work():
+            try:
+                rig = radio_tune.Rig(s["rigctld"])
+                f = int(float(rig.cmd("f")))
+                rig.s.close()
+                GLib.idle_add(self._ask_tune, radio, f, None)
+            except Exception as e:
+                GLib.idle_add(self._ask_tune, radio, None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ask_tune(self, radio, freq, err):
+        rname = SETUP_RADIOS[radio]
+        if err:
+            self.alert(f"Can't reach the {rname}", f"{err}\n\nIs its rigctld running?")
+            return False
+        s = radio_tune.radio_settings(radio)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        lb.add_css_class("boxed-list")
+        fe = Adw.EntryRow(title="Frequency, MHz")
+        fe.set_text(f"{freq / 1e6:.4f}".rstrip("0").rstrip(".") if freq else "")
+        lb.append(fe)
+        box.append(lb)
+        secs_names = ["5 seconds", "10 seconds", "20 seconds"]
+        secs = Gtk.DropDown.new_from_strings(secs_names)
+        secs.set_selected(1)
+        box.append(secs)
+        standby = None
+        watch_ok = True
+        if s["amp"]:
+            fw = radio_tune.amp_forward()
+            watch_ok = fw is not None
+            note = Gtk.Label(wrap=True, xalign=0)
+            note.add_css_class("caption")
+            note.set_label("Amp watchdog ON: DN-AUTO sees the amp; the tune stops at once if it shows "
+                           "over 50 W forward." if watch_ok else
+                           "⚠ DN-AUTO Monitor isn't running, so the amp can't be watched. "
+                           "Only tune if you're sure the amp is in STANDBY.")
+            if not watch_ok:
+                note.add_css_class("error")
+            box.append(note)
+            standby = Gtk.CheckButton(label="The amp is in STANDBY (bypassed)")
+            box.append(standby)
+        self._tune_widgets = (fe, secs, standby)                   # for the test harness
+        if radio == "ft991a":
+            body = ("QSY, then a 10 W tone into DATA-USB so the tuner can match. Power goes back to what it "
+                    "was and the radio stays on the new frequency.\n\nMercury (and the connector or Pat mode "
+                    "on it) is stopped for the tune and started again after -- you'll be asked for your "
+                    "password.")
+        else:
+            body = ("QSY, then a 10 W tone (DATA mode) so the tuner can match. Power and mode go back to what "
+                    "they were; the radio stays on the new frequency.\n\nThe KX3 drives the amp: put the amp "
+                    "in STANDBY first.")
+
+        def done(rid):
+            if rid != "yes":
+                return
+            try:
+                hz = radio_tune.parse_freq(fe.get_text())
+            except radio_tune.TuneError as e:
+                self.alert("Frequency?", str(e))
+                return
+            if not radio_tune.in_band(hz):
+                self.alert("Not an amateur frequency", f"{hz / 1e6:.4f} MHz isn't inside a US amateur band.")
+                return
+            n = (5, 10, 20)[secs.get_selected()]
+            self._tune_run(radio, hz, n, no_watchdog=s["amp"] and not watch_ok)
+
+        d = self.ask(f"QSY and tune the {rname}?", body,
+                     [("no", "Cancel", None), ("yes", "Tune", "destructive" if s["amp"] else "suggested")],
+                     done, default="yes", extra=box)
+        if standby is not None:
+            d.set_response_enabled("yes", False)
+            standby.connect("toggled", lambda c: d.set_response_enabled("yes", c.get_active()))
+        return False
+
+    def _tune_run(self, radio, hz, secs, no_watchdog=False):
+        rname = SETUP_RADIOS[radio]
+        self._setup_start(radio, f"tuning the {rname} on {hz / 1e6:.4f} MHz…")
+        self.tune_btns[radio].set_sensitive(False)
+        if radio == "ft991a":
+            self.switching = True                          # MERCURY/PAT buttons wait
+            for b in self.mode_btns.values():
+                b.set_sensitive(False)
+        self._auth_label = f"Stop Mercury for a {rname} tune, then start it again"
+        self._auth_tries = 0
+        cmd = [sys.executable, str(HERE / "radio_tune.py"), radio, str(hz), "--secs", str(secs)]
+        if no_watchdog:
+            cmd.append("--no-amp-watchdog")
+
+        def work():
+            lines = []
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                     env=self._rp_env(), stdin=subprocess.DEVNULL)
+                for line in p.stdout:
+                    line = line.rstrip()
+                    lines.append(line)
+                    GLib.idle_add(self.setup_info[radio].set_label, line.strip()[:120])
+                code = p.wait(timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                code, lines = -1, lines + [str(e)]
+            GLib.idle_add(self._tune_done, radio, code, lines)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tune_done(self, radio, code, lines):
+        rname = SETUP_RADIOS[radio]
+        self._auth_label = ""
+        self.tune_btns[radio].set_sensitive(True)
+        if radio == "ft991a":
+            self.switching = False
+        self._setup_done(radio)
+        summary = next((l for l in reversed(lines) if l.startswith(("TUNED:", "TUNE:"))), "")
+        if code == 0 and summary.startswith("TUNED:"):
+            self.toast(f"{rname} tuned: {summary[7:].strip()}")
+        else:
+            self.alert(f"{rname} tune", "\n".join(lines[-16:]) or "radio-tune gave no output")
+        self.refresh()
+        return False
 
     # ------------------------------------------------------- data/voice setup
 
