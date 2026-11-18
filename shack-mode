@@ -36,6 +36,7 @@ APP_RE='(wsjtx|jt9|js8call|js8)'      # process names that use the radio
 PAT_UNIT=pat-listen                   # systemd/pat-listen.service
 REVERT_UNIT=shack-pat-revert          # one-off timer that ends pat mode
 REVERT_BIN=${SHACK_PAT_REVERT:-/usr/local/sbin/shack-pat-revert}
+WATCH_BIN=${SHACK_WATCH:-/usr/local/sbin/shack-watch}   # optional: checks the right program got Mercury
 PAT_DEFAULT=4h
 PAT_MAX_S=86400
 
@@ -75,6 +76,13 @@ ptt_off() {
         0) ;;
         *) warn "rigctld isn't answering on $RIG (is rigctld running?)" ;;
     esac
+}
+
+handback_check() {   # after a switch: did the right program get Mercury? (skipped if not installed)
+    [ -x "$WATCH_BIN" ] || return 0
+    echo "   checking that it got Mercury…"
+    "${SUDO[@]}" "$WATCH_BIN" check-handback --wait 45 \
+        || warn "it didn't -- see above; a push went to your phone if ntfy is set up"
 }
 
 outbox_list() { find "$SPOOL" -type f ! -name '.*' 2>/dev/null || true; }
@@ -206,6 +214,7 @@ mode_mercury() {
         "${SUDO[@]}" systemctl start mercury-connector
         set_state mercury
         ensure_hfsync
+        handback_check
         ok "mercury-connector has Mercury again (HF Contact and HF mail are listening; Pat stopped)"
         return 0
     fi
@@ -219,6 +228,7 @@ mode_mercury() {
         "${SUDO[@]}" systemctl restart mercury mercury-connector
         wait_for_codec mercury || die "Mercury still has no sound card -- check: journalctl -u mercury -n 30 | grep -i audio"
     fi
+    handback_check
     ok "Mercury has the radio (HF mail gateway is listening)"
 }
 
@@ -252,6 +262,7 @@ mode_pat() {
     STATE_UNTIL=$until
     set_state pat mercury-connector
     ensure_hfsync
+    handback_check
     ok "Pat is listening for Winlink P2P until $(date -d "@$until" '+%a %H:%M'), then back to mercury"
     echo "   HF Contact guests and HF mail wait until then. Pat's page: http://127.0.0.1:8081"
     local n; n=$(outbox_list | wc -l)

@@ -1,0 +1,12 @@
+# Checks every couple of minutes that the right program holds Mercury, and
+# pushes one alert after 10 minutes off the air (and one when it's back).
+#   sudo install -m 755 shack_watch.py /usr/local/sbin/shack-watch
+#   sudo install -m 644 systemd/shack-watch.service systemd/shack-watch.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now shack-watch.timer
+[Unit]
+Description=Shack watch: is the station on the air?
+After=mercury.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/shack-watch watch

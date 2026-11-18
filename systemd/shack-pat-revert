@@ -15,4 +15,7 @@ if systemctl is-active --quiet mercury; then
 fi
 systemctl stop pat-listen 2>/dev/null || true
 printf 'MODE=mercury\nSINCE=%s\nPAUSED=""\n' "$(date +%s)" > "$STATE"
-logger -t shack-mode "Pat mode time is up: mercury-connector has Mercury again" 2>/dev/null || true
+logger -t shack-mode "Pat mode time is up: handing Mercury back to mercury-connector" 2>/dev/null || true
+# did it actually get Mercury? (another program can grab it in the gap) -- pushes an alert if not
+WATCH=${SHACK_WATCH:-/usr/local/sbin/shack-watch}
+[ -x "$WATCH" ] && "$WATCH" check-handback --wait 45 || true

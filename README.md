@@ -71,6 +71,37 @@ shack-mode mercury       # back early
 - `pat-listen.service` has `Conflicts=mercury-connector.service`, so starting one stops the other. Nothing can leave both trying to use Mercury.
 - The switch back is a one-off systemd timer (`shack-pat-revert.timer`) that runs `shack-pat-revert` as root, so no password is needed when it fires. Switching to any mode by hand cancels it, and pressing PAT again while Pat is on just moves the end time.
 - Pat's own web page, for reading what arrived, is at `http://127.0.0.1:8081` on the shack computer only. It has no password, so it isn't put on the network.
+- **Only one Pat may point at Mercury.** If you also run Pat's packaged `pat@<you>.service` (the everyday one on 8080), give it its own config with `varahf` aimed at nothing, or it grabs Mercury the moment Pat mode ends and the connector is locked out:
+
+  ```
+  # copy of your config with varahf -> localhost:1 (nothing listens there)
+  python3 -c 'import json,os;p=os.path.expanduser("~/.config/pat/");c=json.load(open(p+"config.json"));c.setdefault("varahf",{})["addr"]="localhost:1";json.dump(c,open(p+"config-telnet.json","w"),indent=2);os.chmod(p+"config-telnet.json",0o600)'
+  sudo mkdir -p /etc/systemd/system/pat@$USER.service.d
+  printf '[Service]\nExecStart=\nExecStart=/usr/bin/pat --config %s/.config/pat/config-telnet.json http\n' "$HOME" \
+      | sudo tee /etc/systemd/system/pat@$USER.service.d/telnet-only.conf
+  sudo systemctl daemon-reload && sudo systemctl restart pat@$USER
+  ```
+
+  Both Pats still share one mailbox. Change your Winlink password or callsign in both files.
+
+### Watch (optional, recommended)
+
+Mercury serves one program at a time, so if the wrong one gets there first, the station goes quietly off the air while the connector restarts over and over. `shack-watch` catches that:
+
+- after every switch to MERCURY or PAT, and when Pat mode ends by itself, it waits up to 45 s for the right program (the connector, or `pat-listen`) to hold Mercury. If something else does, it says what, down to the service (`pat (pid 905747, pat@ag7jc.service)`), and pushes an alert to your phone
+- a timer checks every 2 minutes and pushes once after 10 minutes off the air in MERCURY or PAT mode (Mercury down, the connector locked out, the wrong program holding it), and again when it's back
+- `sudo shack-watch status` says who holds Mercury right now
+
+```
+sudo install -m 755 shack_watch.py /usr/local/sbin/shack-watch
+sudo install -D -m 600 alerts.env.example /etc/shack-services/alerts.env      # then set NTFY_URL
+sudo install -m 644 systemd/shack-watch.service systemd/shack-watch.timer /etc/systemd/system/
+sudo install -D -m 644 systemd/mercury-connector.service.d/restart.conf /etc/systemd/system/mercury-connector.service.d/restart.conf
+sudo install -m 755 systemd/shack-pat-revert /usr/local/sbin/
+sudo systemctl daemon-reload && sudo systemctl enable --now shack-watch.timer
+```
+
+The alerts file can use the same ntfy topic as HF Contact alerts. It's root-only because the topic name is the secret. `restart.conf` slows the connector's restarts to every 30 s.
 
 ## Tune
 
@@ -137,7 +168,7 @@ systemctl --user daemon-reload && systemctl --user enable --now hf-alerts
 - `shack-mode` runs as you and asks for sudo itself. Run it without `sudo`.
 - While Mercury is stopped on purpose, `/run/shack-mode` says so (mode, since when, which units), and Shack Services shows those units as PAUSED instead of red. An outside monitor can read the same file to tell "paused" from "down". `/run` is cleared at boot, so a reboot means Mercury again.
 - Old window: `SSM_UI=tk ./service_monitor_launcher.sh`
-- Tests: `python3 -m unittest test_notifier test_shack_mode test_shack_mode_pat test_setup_row test_hf_row test_hf_alerts test_radio_tune`
+- Tests: `python3 -m unittest test_notifier test_shack_mode test_shack_mode_pat test_setup_row test_hf_row test_hf_alerts test_radio_tune test_shack_watch`
 
 ## License
 

@@ -40,6 +40,8 @@ FAKE_RIGCTL = '#!/usr/bin/env bash\necho 0\n'
 FAKE_FUSER = ('#!/usr/bin/env bash\necho "USER PID ACCESS COMMAND"\n'
               '[ -f "$FAKE_UNITS/mercury" ] && echo "/dev/snd/pcmC1D0c: ag7jc 123 F.... mercury"\nexit 0\n')
 FAKE_QUIET = '#!/usr/bin/env bash\nexit 1\n'
+FAKE_WATCH = ('#!/usr/bin/env bash\necho "shack-watch $*" >> "$FAKE_LOG"\n'
+              '[ -n "$FAKE_WATCH_FAIL" ] && { echo "Mercury is held by pat"; exit 1; }\nexit 0\n')
 
 
 class PatMode(unittest.TestCase):
@@ -51,7 +53,8 @@ class PatMode(unittest.TestCase):
         for name, body in (("systemctl", FAKE_SYSTEMCTL), ("sudo", FAKE_SUDO), ("systemd-run", FAKE_RUN),
                            ("rigctl", FAKE_RIGCTL), ("fuser", FAKE_FUSER), ("pactl", "#!/bin/sh\nexit 0\n"),
                            ("pgrep", FAKE_QUIET), ("logger", "#!/bin/sh\n"),
-                           ("id", '#!/bin/sh\necho 1000\n')):     # shack-mode refuses to run as root
+                           ("id", '#!/bin/sh\necho 1000\n'),       # shack-mode refuses to run as root
+                           ("shack-watch", FAKE_WATCH)):
             p = os.path.join(self.bin, name)
             with open(p, "w") as f:
                 f.write(body)
@@ -63,7 +66,8 @@ class PatMode(unittest.TestCase):
         self.log = os.path.join(self.tmp, "log")
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_UNITS=self.units,
                         FAKE_LOG=self.log, SHACK_MODE_FILE=self.state, SHACK_ASOUND=asound,
-                        SHACK_PAT_REVERT=REVERT, FAKE_PAT_INSTALLED="1", HOME=self.tmp)
+                        SHACK_PAT_REVERT=REVERT, FAKE_PAT_INSTALLED="1", HOME=self.tmp,
+                        SHACK_WATCH=os.path.join(self.bin, "shack-watch"))     # never the real one
         os.makedirs(os.path.join(self.tmp, "hf_spool", "outgoing"))
 
     def tearDown(self):
@@ -106,6 +110,26 @@ class PatMode(unittest.TestCase):
         self.assertEqual(self.state_vals()["MODE"], "mercury")
         self.assertNotIn("UNTIL", self.state_vals())
         self.assertIn("systemctl stop shack-pat-revert.timer", open(self.log).read())
+
+    def test_each_switch_checks_the_right_program_got_mercury(self):
+        self.up("mercury", "mercury-connector", "hf-sync")
+        self.run_mode("pat", "1h")
+        self.run_mode("mercury")
+        self.assertEqual(open(self.log).read().count("shack-watch check-handback --wait 45"), 2)
+
+    def test_a_failed_handback_is_reported_not_fatal(self):
+        self.up("mercury", "pat-listen", "hf-sync")
+        r = self.run_mode("mercury", env={"FAKE_WATCH_FAIL": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Mercury is held by pat", r.stdout)
+        self.assertIn("it didn't", r.stdout)
+        self.assertEqual(self.state_vals()["MODE"], "mercury")
+
+    def test_without_shack_watch_installed(self):
+        self.up("mercury", "mercury-connector", "hf-sync")
+        r = self.run_mode("pat", "1h", env={"SHACK_WATCH": "/nonexistent/shack-watch"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("shack-watch", open(self.log).read())
 
     def test_until_a_time_and_changing_the_end(self):
         self.up("mercury", "mercury-connector", "hf-sync")
@@ -189,6 +213,7 @@ class Revert(unittest.TestCase):
         self.assertEqual(self.revert().returncode, 0)
         self.assertEqual(self.t.active(), ["hf-sync", "mercury", "mercury-connector"])
         self.assertEqual(self.t.state_vals()["MODE"], "mercury")
+        self.assertIn("shack-watch check-handback", open(self.t.log).read().splitlines()[-1])
 
     def test_leaves_other_modes_alone(self):
         self.t.up("hf-sync")
