@@ -74,15 +74,15 @@ shack-mode mercury       # back early
 - **Only one Pat may point at Mercury.** If you also run Pat's packaged `pat@<you>.service` (the everyday one on 8080), give it its own config with `varahf` aimed at nothing, or it grabs Mercury the moment Pat mode ends and the connector is locked out:
 
   ```
-  # copy of your config with varahf -> localhost:1 (nothing listens there)
-  python3 -c 'import json,os;p=os.path.expanduser("~/.config/pat/");c=json.load(open(p+"config.json"));c.setdefault("varahf",{})["addr"]="localhost:1";json.dump(c,open(p+"config-telnet.json","w"),indent=2);os.chmod(p+"config-telnet.json",0o600)'
+  # copy of your config with every modem that points at Mercury (varahf AND varafm) -> localhost:1, where nothing listens
+  python3 -c 'import json,os;p=os.path.expanduser("~/.config/pat/");c=json.load(open(p+"config.json"));[v.__setitem__("addr","localhost:1") for v in c.values() if isinstance(v,dict) and str(v.get("addr","")).endswith(":8300")];json.dump(c,open(p+"config-telnet.json","w"),indent=2);os.chmod(p+"config-telnet.json",0o600)'
   sudo mkdir -p /etc/systemd/system/pat@$USER.service.d
   printf '[Service]\nExecStart=\nExecStart=/usr/bin/pat --config %s/.config/pat/config-telnet.json http\n' "$HOME" \
       | sudo tee /etc/systemd/system/pat@$USER.service.d/telnet-only.conf
   sudo systemctl daemon-reload && sudo systemctl restart pat@$USER
   ```
 
-  Both Pats still share one mailbox. Change your Winlink password or callsign in both files.
+  Both Pats still share one mailbox. Change your Winlink password or callsign in both files. Check it worked: `journalctl -u mercury --since -5min | grep -c refused` should be 0 (Mercury logs every program it turns away).
 
 ### Watch (optional, recommended)
 
